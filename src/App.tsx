@@ -1,157 +1,215 @@
+import { useState } from "react";
 import "./styles.css";
+import { AdjustmentEditor } from "./components/AdjustmentEditor";
+import { ChainDetail } from "./components/ChainDetail";
+import { Dashboard } from "./components/Dashboard";
+import { InitialFormEditor } from "./components/InitialFormEditor";
+import { LedgerSidebar } from "./components/LedgerSidebar";
+import { chainKey, getLatestRevision } from "./domain/model";
+import type { AdjustmentForm, InitialForm as InitialFormType } from "./domain/types";
+import { useLedger } from "./state/useLedger";
+import { evaluateAdjustment, validateInitial } from "./validation/validate";
 
-const project = {
-  "id": "hxwl-01",
-  "port": 5101,
-  "title": "听力验配记录",
-  "subtitle": "门店听力师的验配档案与听力曲线工作台",
-  "stack": "React + Vite + TypeScript + CSS",
-  "theme": [
-    "#155e75",
-    "#22c55e",
-    "#f97316"
-  ],
-  "domain": "听力验配",
-  "users": [
-    "听力师",
-    "门店主管",
-    "复诊助理"
-  ],
-  "metrics": [
-    "左耳PTA",
-    "右耳PTA",
-    "言语识别率",
-    "复诊天数"
-  ],
-  "filters": [
-    "初配",
-    "复调",
-    "儿童",
-    "老人"
-  ],
-  "fields": [
-    "气导",
-    "骨导",
-    "言语识别率",
-    "助听器型号",
-    "增益调整",
-    "用户反馈"
-  ],
-  "records": [
-    [
-      "Liu-024",
-      "双耳高频下降",
-      "初配",
-      "RIC机型，2kHz后增益提高4dB"
-    ],
-    [
-      "Chen-118",
-      "单侧传导性损失",
-      "复调",
-      "低频压缩略降，反馈啸叫已消失"
-    ],
-    [
-      "Zhao-077",
-      "老人语频区下降",
-      "复诊",
-      "言语识别率从64%提升到76%"
-    ]
-  ]
-};
-
-const statusColors = ["status-ok", "status-watch", "status-danger"];
-
-function MetricCard({ label, value, index }: { label: string; value: string; index: number }) {
-  return (
-    <article className="metric-card">
-      <span>{label}</span>
-      <strong>{value}</strong>
-      <i className={statusColors[index % statusColors.length]} />
-    </article>
-  );
-}
+type View =
+  | { mode: "chain"; key: string }
+  | { mode: "adjustment"; key: string }
+  | { mode: "initial"; draftId: string };
 
 function App() {
-  const values = project.metrics.map((metric: string, index: number) => {
-    const base = [84, 12, 31, 7][index % 4];
-    return String(base + index * 3);
+  const ledger = useLedger();
+  const [view, setView] = useState<View | null>(() => {
+    const first = ledger.chainList[0];
+    return first
+      ? { mode: "chain", key: chainKey(first.customerCode, first.ear) }
+      : null;
   });
+  const [toast, setToast] = useState<string | null>(null);
+
+  const flash = (msg: string) => {
+    setToast(msg);
+    window.setTimeout(() => setToast(null), 2600);
+  };
+
+  const selectedKey = view && "key" in view ? view.key : null;
+
+  const activeChain = selectedKey ? ledger.getChain(selectedKey) : undefined;
+  const activeDraft = selectedKey
+    ? ledger.getAdjustmentDraft(selectedKey)
+    : undefined;
+  const activeInitialDraft =
+    view?.mode === "initial"
+      ? ledger.initialDraftList.find((d) => d.draftId === view.draftId)
+      : undefined;
+
+  const handleNewInitial = () => {
+    const draft = ledger.startInitial();
+    setView({ mode: "initial", draftId: draft.draftId });
+  };
+
+  const handleConfirmInitial = (form: InitialFormType) => {
+    if (view?.mode !== "initial") return;
+    const draftId = view.draftId;
+    const result = validateInitial(form);
+    if (!result.parsed) return;
+    const saved = ledger.confirmInitial(draftId, result.parsed);
+    if (!saved.ok) {
+      flash(saved.error ?? "初配确认失败");
+      return;
+    }
+    const key = chainKey(result.parsed.customerCode, result.parsed.ear);
+    setView({ mode: "chain", key });
+    flash("初配已确认，台账建立为第 1 版");
+  };
+
+  const handleStartAdjustment = (key: string) => {
+    ledger.openAdjustmentDraft(key);
+    setView({ mode: "adjustment", key });
+  };
+
+  const handleConfirmAdjustment = (key: string, form: AdjustmentForm) => {
+    const chain = ledger.getChain(key);
+    if (!chain) return;
+    const result = evaluateAdjustment(form, getLatestRevision(chain));
+    if (!result.parsed) return;
+    const saved = ledger.confirmAdjustment(key, result.parsed);
+    if (!saved.ok) {
+      flash(saved.error ?? "复调确认失败");
+      return;
+    }
+    setView({ mode: "chain", key });
+    flash(`复调已确认，旧单保留，已追加为第 ${getLatestRevision(chain).revNo + 1} 版`);
+  };
 
   return (
     <main className="app-shell">
       <section className="hero">
         <div>
-          <p className="eyebrow">{project.id} · port {project.port}</p>
-          <h1>{project.title}</h1>
-          <p className="subtitle">{project.subtitle}</p>
+          <p className="eyebrow">hxwl-01 · 验配台账</p>
+          <h1>听力验配修订台账</h1>
+          <p className="subtitle">
+            初配录客户、耳别、听力数据与助听器；复调自动带出上次增益，增益变化超
+            6dB 或反馈等级升高必须写明原因。确认后旧单不可覆盖，只接成编号修订。
+          </p>
         </div>
         <div className="stack-card">
-          <span>技术栈</span>
-          <strong>{project.stack}</strong>
+          <span>架构分层</span>
+          <strong>
+            资料（domain） · 校验（validation） · 存储（storage）
+          </strong>
+          <span>草稿分键存储：复调按客户+耳别唯一，初配按新单独立</span>
+          <button
+            className="reset-btn"
+            onClick={() => {
+              if (window.confirm("恢复为示例台账？当前草稿与确认记录将被清空。")) {
+                ledger.resetToSeed();
+                const first = ledger.chainList[0];
+                setView(
+                  first
+                    ? { mode: "chain", key: chainKey(first.customerCode, first.ear) }
+                    : null
+                );
+                flash("已恢复示例台账");
+              }
+            }}
+          >
+            恢复示例数据
+          </button>
         </div>
       </section>
 
-      <section className="metrics-grid">
-        {project.metrics.map((metric: string, index: number) => (
-          <MetricCard key={metric} label={metric} value={values[index]} index={index} />
-        ))}
-      </section>
+      <Dashboard
+        chains={ledger.chainList}
+        pendingAdjustments={ledger.adjustmentDraftList}
+      />
 
       <section className="workspace">
-        <aside className="panel narrow">
-          <h2>角色</h2>
-          <div className="chips">
-            {project.users.map((user: string) => (
-              <span key={user}>{user}</span>
-            ))}
-          </div>
-          <h2>筛选</h2>
-          <div className="chips muted">
-            {project.filters.map((filter: string) => (
-              <button key={filter}>{filter}</button>
-            ))}
-          </div>
-        </aside>
+        <LedgerSidebar
+          chains={ledger.chainList}
+          adjustmentDrafts={ledger.adjustmentDraftList}
+          initialDrafts={ledger.initialDraftList}
+          selectedKey={selectedKey}
+          onSelectChain={(key) => setView({ mode: "chain", key })}
+          onNewInitial={handleNewInitial}
+          onOpenInitialDraft={(draftId) => setView({ mode: "initial", draftId })}
+        />
 
-        <section className="panel">
-          <div className="section-heading">
-            <div>
-              <p>{project.domain}</p>
-              <h2>记录字段</h2>
-            </div>
-            <button className="primary-action">新增记录</button>
-          </div>
-          <div className="field-grid">
-            {project.fields.map((field: string) => (
-              <label key={field}>
-                <span>{field}</span>
-                <input placeholder={"填写" + field} />
-              </label>
-            ))}
-          </div>
-        </section>
+        <div className="main-pane">
+          {view?.mode === "initial" && activeInitialDraft ? (
+            <InitialFormEditor
+              draft={activeInitialDraft}
+              onSaveDraft={(form) => ledger.saveInitialDraft(activeInitialDraft.draftId, form)}
+              onConfirm={handleConfirmInitial}
+              onDiscard={() => {
+                if (window.confirm("放弃这份初配草稿？已填内容将删除。")) {
+                  ledger.discardInitialDraft(activeInitialDraft.draftId);
+                  setView(null);
+                }
+              }}
+              onBack={() => {
+                const first = ledger.chainList[0];
+                setView(first ? { mode: "chain", key: chainKey(first.customerCode, first.ear) } : null);
+              }}
+              codeTaken={(code, ear) => Boolean(ledger.getChain(chainKey(code, ear)))}
+            />
+          ) : view?.mode === "adjustment" && activeChain ? (
+            <AdjustmentEditor
+              chain={activeChain}
+              draft={activeDraft!}
+              onSaveDraft={(form) =>
+                ledger.saveAdjustmentDraft(
+                  chainKey(activeChain.customerCode, activeChain.ear),
+                  form
+                )
+              }
+              onConfirm={(form) =>
+                handleConfirmAdjustment(
+                  chainKey(activeChain.customerCode, activeChain.ear),
+                  form
+                )
+              }
+              onDiscard={() => {
+                const key = chainKey(activeChain.customerCode, activeChain.ear);
+                if (window.confirm("放弃该耳待确认的复调草稿？")) {
+                  ledger.discardAdjustmentDraft(key);
+                  setView({ mode: "chain", key });
+                }
+              }}
+            />
+          ) : activeChain ? (
+            <>
+              <ChainDetail
+                chain={activeChain}
+                draft={activeDraft}
+                onStartAdjustment={() =>
+                  handleStartAdjustment(chainKey(activeChain.customerCode, activeChain.ear))
+                }
+                onResumeAdjustment={() =>
+                  setView({
+                    mode: "adjustment",
+                    key: chainKey(activeChain.customerCode, activeChain.ear),
+                  })
+                }
+                onCancelAdjustment={() => {
+                  const key = chainKey(activeChain.customerCode, activeChain.ear);
+                  if (window.confirm("放弃该耳待确认的复调草稿？")) {
+                    ledger.discardAdjustmentDraft(key);
+                  }
+                }}
+              />
+            </>
+          ) : (
+            <section className="panel empty-state">
+              <h2>还没有台账</h2>
+              <p>从左侧「初配录单」开始建立客户档案。</p>
+              <button className="primary-action" onClick={handleNewInitial}>
+                新建初配
+              </button>
+            </section>
+          )}
+        </div>
       </section>
 
-      <section className="records panel">
-        <div className="section-heading">
-          <div>
-            <p>示例数据</p>
-            <h2>近期记录</h2>
-          </div>
-          <button>导出摘要</button>
-        </div>
-        <div className="record-list">
-          {project.records.map((record: string[], index: number) => (
-            <article key={record.join("-")} className="record-card">
-              <div className="record-index">{String(index + 1).padStart(2, "0")}</div>
-              <div>
-                <h3>{record[0]}</h3>
-                <p>{record.slice(1).join(" · ")}</p>
-              </div>
-            </article>
-          ))}
-        </div>
-      </section>
+      {toast && <div className="toast">{toast}</div>}
     </main>
   );
 }
